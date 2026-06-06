@@ -1,2 +1,9 @@
 
 data/
+#
+# local training outputs and checkpoints
+#
+exps/public/
+*.pth
+*.pt
+*.ckpt
