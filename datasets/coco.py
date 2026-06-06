@@ -166,12 +166,25 @@ def build(image_set, args):
     root = Path(args.coco_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
+
+    train_img = Path(args.coco_train_images) if getattr(args, "coco_train_images", "") else (root / "train2017")
+    train_ann = Path(args.coco_train_ann) if getattr(args, "coco_train_ann", "") else (root / "annotations" / f"{mode}_train2017.json")
+    val_img = Path(args.coco_val_images) if getattr(args, "coco_val_images", "") else (root / "val2017")
+    val_ann = Path(args.coco_val_ann) if getattr(args, "coco_val_ann", "") else (root / "annotations" / f"{mode}_val2017.json")
+
     PATHS = {
-        "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
-        "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+        "train": (train_img, train_ann),
+        "val": (val_img, val_ann),
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set, args.bigger), return_masks=args.masks,
-                            cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+    dataset = CocoDetection(
+        img_folder,
+        ann_file,
+        transforms = make_coco_transforms(image_set, args.bigger),
+        return_masks = args.masks,
+        cache_mode = args.cache_mode,
+        local_rank = get_local_rank(),
+        local_size = get_local_size()
+    )
     return dataset

@@ -1,0 +1,4 @@
+# ninja log v5
+0	6160	1778893737174219734	/home/eafpres/DETA/DETA/models/ops/build/temp.linux-x86_64-cpython-39/home/eafpres/DETA/DETA/models/ops/src/cpu/ms_deform_attn_cpu.o	7054bf2fdf657b52
+0	13749	1778893744758218077	/home/eafpres/DETA/DETA/models/ops/build/temp.linux-x86_64-cpython-39/home/eafpres/DETA/DETA/models/ops/src/cuda/ms_deform_attn_cuda.o	f8415a25cc562dd4
+0	17131	1778893748142217332	/home/eafpres/DETA/DETA/models/ops/build/temp.linux-x86_64-cpython-39/home/eafpres/DETA/DETA/models/ops/src/vision.o	7be0a9e2bd4b6080

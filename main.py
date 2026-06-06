@@ -126,7 +126,14 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
-
+#
+# added to allow custom data and annotation paths
+#
+    parser.add_argument("--coco_train_images", default = "", type = str)
+    parser.add_argument("--coco_val_images", default = "", type = str)
+    parser.add_argument("--coco_train_ann", default = "", type = str)
+    parser.add_argument("--coco_val_ann", default = "", type = str)
+#
     return parser
 
 
@@ -243,7 +250,7 @@ def main(args):
             print('Missing Keys: {}'.format(missing_keys))
         if len(unexpected_keys) > 0:
             print('Unexpected Keys: {}'.format(unexpected_keys))
-        print('finetuning from epoch', checkpoint['epoch'])
+        print('finetuning from epoch', checkpoint.get('epoch', 'weights_only'))
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -278,7 +285,7 @@ def main(args):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
-    
+
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
