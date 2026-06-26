@@ -1,2 +1,22 @@
 
 data/
+
+.spyproject/config/
+
+__pycache__/
+
+adet_swin_pt_o365.pth
+
+checkpoints/
+
+exps/
+
+results/
+
+models/ops/build/lib.linux-x86_64-cpython-39/modules/
+
+models/
+
+*.pth
+
+datasets/
