@@ -25,7 +25,6 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
-
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
     parser.add_argument('--lr', default=2e-4, type=float)
@@ -34,24 +33,25 @@ def get_args_parser():
     parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
+#
+# modification to allow different gradient accumulation strategies
+#
+    parser.add_argument('--accumulation_steps', default = 1,type = int,
+                        help = 'Number of physical batches to accumulate before optimizer step'
+                        )
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--lr_drop', default=40, type=int)
     parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
-
-
     parser.add_argument('--sgd', action='store_true')
-
     # Variants of Deformable DETR
     parser.add_argument('--with_box_refine', default=False, action='store_true')
     parser.add_argument('--two_stage', default=False, action='store_true')
-
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
-
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
@@ -62,7 +62,6 @@ def get_args_parser():
     parser.add_argument('--position_embedding_scale', default=2 * np.pi, type=float,
                         help="position / size * scale")
     parser.add_argument('--num_feature_levels', default=4, type=int, help='number of feature levels')
-
     # * Transformer
     parser.add_argument('--enc_layers', default=6, type=int,
                         help="Number of encoding layers in the transformer")
@@ -80,15 +79,12 @@ def get_args_parser():
                         help="Number of query slots")
     parser.add_argument('--dec_n_points', default=4, type=int)
     parser.add_argument('--enc_n_points', default=4, type=int)
-
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
                         help="Train segmentation head if the flag is provided")
-
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
-
     # * Matcher
     parser.add_argument('--assign_first_stage', action='store_true')
     parser.add_argument('--assign_second_stage', action='store_true')
@@ -98,7 +94,6 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-
     # * Loss coefficients
     parser.add_argument('--mask_loss_coef', default=1, type=float)
     parser.add_argument('--dice_loss_coef', default=1, type=float)
@@ -106,14 +101,12 @@ def get_args_parser():
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
-
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', default='./data/coco', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
     parser.add_argument('--bigger', action='store_true')
-
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
@@ -126,10 +119,16 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
-
+#
+# added to allow custom data and annotation paths
+#
+    parser.add_argument("--coco_train_images", default = "", type = str)
+    parser.add_argument("--coco_val_images", default = "", type = str)
+    parser.add_argument("--coco_train_ann", default = "", type = str)
+    parser.add_argument("--coco_val_ann", default = "", type = str)
+#
     return parser
-
-
+#
 def main(args):
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -225,12 +224,20 @@ def main(args):
         base_ds = get_coco_api_from_dataset(dataset_val)
 
     if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+        checkpoint = torch.load(
+          args.frozen_weights,
+          map_location = "cpu",
+          weights_only = False
+          )
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
     if args.finetune:
-        checkpoint = torch.load(args.finetune, map_location='cpu')
+        checkpoint = torch.load(
+            args.finetune,
+            map_location = "cpu",
+            weights_only = False
+        )
         state_dict = checkpoint['model']
         for k in list(state_dict.keys()):
             if 'class_embed' in k:
@@ -243,45 +250,144 @@ def main(args):
             print('Missing Keys: {}'.format(missing_keys))
         if len(unexpected_keys) > 0:
             print('Unexpected Keys: {}'.format(unexpected_keys))
-        print('finetuning from epoch', checkpoint['epoch'])
+        print('finetuning from epoch', checkpoint.get('epoch', 'weights_only'))
+    best_val_loss = float("inf")
+    best_val_ap = -float("inf")
+    best_val_f1 = -float("inf")
+    best_val_f1_thresholds = None
     if args.resume:
-        if args.resume.startswith('https'):
+        if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
+                args.resume,
+                map_location = "cpu",
+                check_hash = True
+            )
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+            checkpoint = torch.load(
+                args.resume,
+                map_location = "cpu",
+                weights_only = False
+            )
+        if "best_val_loss" in checkpoint:
+            best_val_loss = float(checkpoint["best_val_loss"])
+            print(
+                f"restored best validation loss: "
+                f"{best_val_loss:.6f}"
+            )
+        if "best_val_ap" in checkpoint:
+            best_val_ap = float(checkpoint["best_val_ap"])
+            print(
+                f"restored best validation AP: "
+                f"{best_val_ap:.6f}"
+            )
+        if "best_val_f1" in checkpoint:
+            best_val_f1 = float(checkpoint["best_val_f1"])
+            print(
+                f"restored best validation F1: "
+                f"{best_val_f1:.6f}"
+            )
+        if "best_val_f1_thresholds" in checkpoint:
+            best_val_f1_thresholds = checkpoint["best_val_f1_thresholds"]
+            print(
+                f"restored best validation F1 thresholds: "
+                f"{best_val_f1_thresholds}"
+            )
+        missing_keys, unexpected_keys = \
+            model_without_ddp.load_state_dict(
+                checkpoint["model"],
+                strict = False
+            )
+        unexpected_keys = [
+            key
+            for key in unexpected_keys
+            if not (
+                key.endswith("total_params") or
+                key.endswith("total_ops")
+            )
+        ]
         if len(missing_keys) > 0:
-            print('Missing Keys: {}'.format(missing_keys))
+            print(f"Missing Keys: {missing_keys}")
         if len(unexpected_keys) > 0:
-            print('Unexpected Keys: {}'.format(unexpected_keys))
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+            print(f"Unexpected Keys: {unexpected_keys}")
+        if (
+            not args.eval and
+            "optimizer" in checkpoint and
+            "lr_scheduler" in checkpoint and
+            "epoch" in checkpoint
+        ):
             import copy
             p_groups = copy.deepcopy(optimizer.param_groups)
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            optimizer.load_state_dict(checkpoint["optimizer"])
             for pg, pg_old in zip(optimizer.param_groups, p_groups):
-                pg['lr'] = pg_old['lr']
-                pg['initial_lr'] = pg_old['initial_lr']
+                pg["lr"] = pg_old["lr"]
+                pg["initial_lr"] = pg_old["initial_lr"]
             print(optimizer.param_groups)
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             args.override_resumed_lr_drop = True
             if args.override_resumed_lr_drop:
-                print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
+                print(
+                    "Warning: (hack) "
+                    "args.override_resumed_lr_drop is set to True, "
+                    "so args.lr_drop would override lr_drop in resumed "
+                    "lr_scheduler."
+                )
                 lr_scheduler.step_size = args.lr_drop
-                lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
+                lr_scheduler.base_lrs = list(
+                    map(
+                        lambda group: group["initial_lr"],
+                        optimizer.param_groups
+                    )
+                )
             lr_scheduler.step(lr_scheduler.last_epoch)
-            args.start_epoch = checkpoint['epoch'] + 1
-        # check the resumed model
+            args.start_epoch = checkpoint["epoch"] + 1
         if not args.eval:
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                model,
+                criterion,
+                postprocessors,
+                data_loader_val,
+                base_ds,
+                device,
+                args.output_dir
             )
-    
+            if "best_val_loss" not in checkpoint:
+                best_val_loss = float(test_stats["loss"])
+                print(
+                    f"initialized best validation loss from resumed "
+                    f"checkpoint: {best_val_loss:.6f}"
+                )
+            if (
+                "best_val_ap" not in checkpoint and
+                "coco_eval_bbox" in test_stats
+            ):
+                best_val_ap = float(test_stats["coco_eval_bbox"][0])
+                print(
+                    f"initialized best validation AP from resumed "
+                    f"checkpoint: {best_val_ap:.6f}"
+                )
+            if (
+                "best_val_f1" not in checkpoint and
+                "val_f1_per_class_iou_0_50" in test_stats
+            ):
+                best_val_f1 = float(
+                    test_stats["val_f1_per_class_iou_0_50"]
+                )
+                best_val_f1_thresholds = test_stats.get(
+                    "val_f1_per_class_iou_0_50_thresholds"
+                )
+                print(
+                    f"initialized best validation F1 from resumed "
+                    f"checkpoint: {best_val_f1:.6f} "
+                    f"thresholds={best_val_f1_thresholds}"
+                )
+
     if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
+        test_stats, coco_evaluator = evaluate(model,
+                                              criterion,
+                                              postprocessors,
+                                              data_loader_val,
+                                              base_ds, device,
+                                              args.output_dir)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
@@ -291,51 +397,139 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
+#
+# added accumulation_steps
+#
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
-        lr_scheduler.step()
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 5 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 5 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+          model,
+          criterion,
+          data_loader_train,
+          optimizer,
+          device,
+          epoch,
+          args.clip_max_norm,
+          args.accumulation_steps
         )
+        lr_scheduler.step()
+#
+        test_stats, coco_evaluator = evaluate(
+            model,
+            criterion,
+            postprocessors,
+            data_loader_val,
+            base_ds,
+            device,
+            args.output_dir
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+        val_loss = float(test_stats["loss"])
+        val_ap = None
+        val_f1 = None
+        val_f1_thresholds = None
+
+        if "coco_eval_bbox" in test_stats:
+            val_ap = float(test_stats["coco_eval_bbox"][0])
+
+        if "val_f1_per_class_iou_0_50" in test_stats:
+            val_f1 = float(
+                test_stats["val_f1_per_class_iou_0_50"]
+            )
+            val_f1_thresholds = test_stats.get(
+                "val_f1_per_class_iou_0_50_thresholds"
+            )
+
+        is_best_loss = val_loss < best_val_loss
+        is_best_ap = val_ap is not None and val_ap > best_val_ap
+        is_best_f1 = val_f1 is not None and val_f1 > best_val_f1
+
+        if is_best_loss:
+            best_val_loss = val_loss
+        if is_best_ap:
+            best_val_ap = val_ap
+        if is_best_f1:
+            best_val_f1 = val_f1
+            best_val_f1_thresholds = val_f1_thresholds
+
+        if args.output_dir:
+            checkpoint = {
+                "model": model_without_ddp.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "lr_scheduler": lr_scheduler.state_dict(),
+                "epoch": epoch,
+                "args": args,
+                "best_val_loss": best_val_loss,
+                "best_val_ap": best_val_ap,
+                "best_val_f1": best_val_f1,
+                "best_val_f1_threshold": best_val_f1_thresholds,
+                "val_loss": val_loss,
+                "val_ap": val_ap,
+                "val_f1": val_f1,
+                "val_f1_threshold": val_f1_thresholds,
+            }
+            utils.save_on_master(
+                checkpoint,
+                output_dir / "checkpoint.pth"
+            )
+            if is_best_loss:
+                utils.save_on_master(
+                    checkpoint,
+                    output_dir / "checkpoint_best_loss.pth"
+                )
+                print(
+                    f"saved new best loss checkpoint: "
+                    f"epoch={epoch} "
+                    f"val_loss={val_loss:.6f}"
+                )
+            if is_best_ap:
+                utils.save_on_master(
+                    checkpoint,
+                    output_dir / "checkpoint_best_ap.pth"
+                )
+                print(
+                    f"saved new best AP checkpoint: "
+                    f"epoch={epoch} "
+                    f"val_ap={val_ap:.6f}"
+                )
+            if is_best_f1:
+                utils.save_on_master(
+                    checkpoint,
+                    output_dir / "checkpoint_best_f1.pth"
+                )
+                print(
+                    f"saved new best F1 checkpoint: "
+                    f"epoch={epoch} "
+                    f"val_f1={val_f1:.6f} "
+                    f"thresholds={val_f1_thresholds}"
+                )
+
+        log_stats = {
+            **{f"train_{k}": v for k, v in train_stats.items()},
+            **{f"test_{k}": v for k, v in test_stats.items()},
+            "epoch": epoch,
+            "n_parameters": n_parameters
+        }
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
             if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
+                (output_dir / "eval").mkdir(exist_ok = True)
                 if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
+                    filenames = ["latest.pth"]
                     if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
+                        filenames.append(f"{epoch:03}.pth")
                     for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+                        torch.save(
+                            coco_evaluator.coco_eval["bbox"].eval,
+                            output_dir / "eval" / name
+                        )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Deformable DETR training and evaluation script', parents=[get_args_parser()])
