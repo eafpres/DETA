@@ -6,7 +6,8 @@
 # Modified from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
-
+# Modified by EAF LLC for custom training
+# ------------------------------------------------------------------------
 
 import torch
 import argparse
@@ -14,6 +15,7 @@ import datetime
 import json
 import random
 import time
+import gc
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,16 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+
+def move_optimizer_state_to_device(optimizer, device):
+    """Move optimizer state tensors to the requested device."""
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(
+                    device = device,
+                    non_blocking = True
+                )
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
@@ -127,6 +139,9 @@ def get_args_parser():
     parser.add_argument("--coco_train_ann", default = "", type = str)
     parser.add_argument("--coco_val_ann", default = "", type = str)
 #
+    parser.add_argument("--gamma", default = 0.1, type = float)
+    parser.add_argument("--fused_adamw", action = "store_true")
+    parser.add_argument("--amp", action = "store_true")
     return parser
 #
 def main(args):
@@ -171,10 +186,10 @@ def main(args):
 
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                   pin_memory=True)
+                                   pin_memory=False)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                 pin_memory=True)
+                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                  pin_memory=False)
 
     # lr_backbone_names = ["backbone.0", "backbone.neck", "input_proj", "transformer.encoder"]
     def match_name_keywords(n, name_keywords):
@@ -205,13 +220,26 @@ def main(args):
         }
     ]
     if args.sgd:
-        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
+        optimizer = torch.optim.SGD(param_dicts,
+                                    lr=args.lr,
+                                    momentum=0.9,
                                     weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                      weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
-
+        optimizer = torch.optim.AdamW(
+          param_dicts,
+          lr = args.lr,
+          weight_decay = args.weight_decay,
+          fused = args.fused_adamw
+        )
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+      optimizer,
+      gamma = args.gamma,
+      step_size = args.lr_drop)
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled = args.amp
+    )
+    print(f"AMP enabled: {args.amp}")
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
@@ -321,7 +349,24 @@ def main(args):
             for pg, pg_old in zip(optimizer.param_groups, p_groups):
                 pg["lr"] = pg_old["lr"]
                 pg["initial_lr"] = pg_old["initial_lr"]
-            print(optimizer.param_groups)
+                if args.fused_adamw:
+                    pg["fused"] = True
+                    pg["foreach"] = None
+
+            if args.fused_adamw:
+                move_optimizer_state_to_device(
+                    optimizer = optimizer,
+                    device = device
+                )
+
+            for i, pg in enumerate(optimizer.param_groups):
+              print(
+                  f"optimizer group {i}: "
+                  f"lr={pg.get('lr')} "
+                  f"initial_lr={pg.get('initial_lr')} "
+                  f"fused={pg.get('fused')} "
+                  f"foreach={pg.get('foreach')}"
+              )
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             args.override_resumed_lr_drop = True
             if args.override_resumed_lr_drop:
@@ -340,6 +385,11 @@ def main(args):
                 )
             lr_scheduler.step(lr_scheduler.last_epoch)
             args.start_epoch = checkpoint["epoch"] + 1
+            if args.amp and "scaler" in checkpoint:
+                scaler.load_state_dict(checkpoint["scaler"])
+                print("restored AMP GradScaler state")
+            elif args.amp:
+                print("AMP enabled, but checkpoint has no scaler state")
         if not args.eval:
             test_stats, coco_evaluator = evaluate(
                 model,
@@ -350,43 +400,70 @@ def main(args):
                 device,
                 args.output_dir
             )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+            current_val_loss = float(test_stats["loss"])
+            current_val_ap = None
+            current_val_f1 = None
+            current_val_f1_thresholds = None
+
+            if "coco_eval_bbox" in test_stats:
+                current_val_ap = float(test_stats["coco_eval_bbox"][0])
+
+            if "val_f1_per_class_iou_0_50" in test_stats:
+                current_val_f1 = float(
+                    test_stats["val_f1_per_class_iou_0_50"]
+                )
+                current_val_f1_thresholds = test_stats.get(
+                    "val_f1_per_class_iou_0_50_thresholds"
+                )
+
+            print(
+                f"resume validation metrics: "
+                f"val_loss={current_val_loss:.6f} "
+                f"val_ap={current_val_ap} "
+                f"val_f1={current_val_f1} "
+                f"thresholds={current_val_f1_thresholds}"
+            )
+
             if "best_val_loss" not in checkpoint:
-                best_val_loss = float(test_stats["loss"])
+                best_val_loss = current_val_loss
                 print(
                     f"initialized best validation loss from resumed "
                     f"checkpoint: {best_val_loss:.6f}"
                 )
-            if (
-                "best_val_ap" not in checkpoint and
-                "coco_eval_bbox" in test_stats
-            ):
-                best_val_ap = float(test_stats["coco_eval_bbox"][0])
+
+            if "best_val_ap" not in checkpoint and current_val_ap is not None:
+                best_val_ap = current_val_ap
                 print(
                     f"initialized best validation AP from resumed "
                     f"checkpoint: {best_val_ap:.6f}"
                 )
-            if (
-                "best_val_f1" not in checkpoint and
-                "val_f1_per_class_iou_0_50" in test_stats
-            ):
-                best_val_f1 = float(
-                    test_stats["val_f1_per_class_iou_0_50"]
-                )
-                best_val_f1_thresholds = test_stats.get(
-                    "val_f1_per_class_iou_0_50_thresholds"
-                )
+
+            if "best_val_f1" not in checkpoint and current_val_f1 is not None:
+                best_val_f1 = current_val_f1
+                best_val_f1_thresholds = current_val_f1_thresholds
                 print(
                     f"initialized best validation F1 from resumed "
                     f"checkpoint: {best_val_f1:.6f} "
                     f"thresholds={best_val_f1_thresholds}"
                 )
 
+            del test_stats
+            del coco_evaluator
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
     if args.eval:
         test_stats, coco_evaluator = evaluate(model,
                                               criterion,
                                               postprocessors,
                                               data_loader_val,
-                                              base_ds, device,
+                                              base_ds,
+                                              device,
                                               args.output_dir)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
@@ -397,6 +474,11 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
 #
 # added accumulation_steps
 #
@@ -408,7 +490,9 @@ def main(args):
           device,
           epoch,
           args.clip_max_norm,
-          args.accumulation_steps
+          args.accumulation_steps,
+          amp = args.amp,
+          scaler = scaler
         )
         lr_scheduler.step()
 #
@@ -422,6 +506,7 @@ def main(args):
             args.output_dir
         )
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         val_loss = float(test_stats["loss"])
@@ -457,16 +542,17 @@ def main(args):
                 "model": model_without_ddp.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "lr_scheduler": lr_scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
                 "epoch": epoch,
                 "args": args,
                 "best_val_loss": best_val_loss,
                 "best_val_ap": best_val_ap,
                 "best_val_f1": best_val_f1,
-                "best_val_f1_threshold": best_val_f1_thresholds,
+                "best_val_f1_thresholds": best_val_f1_thresholds,
                 "val_loss": val_loss,
                 "val_ap": val_ap,
                 "val_f1": val_f1,
-                "val_f1_threshold": val_f1_thresholds,
+                "val_f1_thresholds": val_f1_thresholds,
             }
             utils.save_on_master(
                 checkpoint,
@@ -526,7 +612,16 @@ def main(args):
                             coco_evaluator.coco_eval["bbox"].eval,
                             output_dir / "eval" / name
                         )
-
+        del test_stats
+        del coco_evaluator
+        if "checkpoint" in locals():
+          del checkpoint
+        if "log_stats" in locals():
+          del log_stats
+        gc.collect()
+        if torch.cuda.is_available():
+          torch.cuda.synchronize()
+          torch.cuda.empty_cache()
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))

@@ -23,6 +23,12 @@ ETA_RE = re.compile(
   r"\beta:\s+(?P<eta>\d+:\d{2}:\d{2})"
 )
 
+VAL_RE = re.compile(
+  r"(?:^|\s)Test:\s+"
+  r"\[\s*(?P<batch>\d+)\/(?P<total>\d+)\].*?"
+  r"loss: (?P<loss>[0-9.eE+-]+) \((?P<loss_avg>[0-9.eE+-]+)\)"
+)
+
 VAL_F1_RE = re.compile(
   r"VAL_F1\s+"
   r"iou=(?P<iou>[0-9.]+)\s+"
@@ -131,6 +137,7 @@ def parse_args():
   parser.add_argument("--y-min", type = float, default = None)
   parser.add_argument("--y-max", type = float, default = None)
   return parser.parse_args()
+
 def parse_log_line(line, current_epoch):
   """Parse one DETA log line.
   Args:
@@ -156,7 +163,20 @@ def parse_log_line(line, current_epoch):
       )
     }
     return "train", record, epoch
+
+  val_match = VAL_RE.search(line)
+  if val_match is not None and current_epoch is not None:
+    record = {
+      "epoch": current_epoch,
+      "batch": int(val_match.group("batch")),
+      "total": int(val_match.group("total")),
+      "loss": float(val_match.group("loss")),
+      "loss_avg": float(val_match.group("loss_avg"))
+    }
+    return "val", record, current_epoch
+
   val_f1_per_class_match = VAL_F1_PER_CLASS_RE.search(line)
+
   if val_f1_per_class_match is not None and current_epoch is not None:
     record = {
       "epoch": current_epoch,
@@ -220,11 +240,6 @@ def append_train_record(
       val_records[:] = [
         existing_record
         for existing_record in val_records
-        if existing_record["epoch"] < restart_epoch
-      ]
-      val_f1_records[:] = [
-        existing_record
-        for existing_record in val_f1_records
         if existing_record["epoch"] < restart_epoch
       ]
   train_records.append(record)
@@ -310,7 +325,7 @@ class LossMonitorWindow(QtWidgets.QMainWindow):
     self.setWindowFlag(FRAMELESS_HINT, True)
     self.setWindowTitle("DETA loss monitor")
     self.setMinimumSize(520, 300)
-    self.resize(900, 500)
+    self.resize(750, 400)
     frame = QtWidgets.QWidget()
     frame.setObjectName("frame")
     frame.setStyleSheet(
@@ -601,13 +616,13 @@ class LossMonitorWindow(QtWidgets.QMainWindow):
         else "per-class"
       )
       self.val_f1_text.set_text(
-        f"{'validation F1':<21}{latest_val_f1['mode']}\n"
+        f"validation using {latest_val_f1['mode']}\n"
         f"{'IoU':<21}{latest_val_f1['iou']:6.2f}\n"
         f"{'threshold':<21}{threshold_text}\n"
-        f"{'precision':<21}{latest_val_f1['precision']:6.3f}\n"
-        f"{'recall':<21}{latest_val_f1['recall']:6.3f}\n"
-        f"{'f1':<21}{latest_val_f1['f1']:6.3f}\n"
-        f"{'tp/fp/fn':<21}"
+        f"{'macro precision':<21}{latest_val_f1['precision']:6.3f}\n"
+        f"{'macro recall':<21}{latest_val_f1['recall']:6.3f}\n"
+        f"{'macro f1':<21}{latest_val_f1['f1']:6.3f}\n"
+        f"{'all-class tp/fp/fn':<21}"
         f"{latest_val_f1['tp']}/"
         f"{latest_val_f1['fp']}/"
         f"{latest_val_f1['fn']}"

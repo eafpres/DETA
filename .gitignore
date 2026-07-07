@@ -12,3 +12,4 @@ exps/
 results/
 models/ops/build/
 adet_swin_pt_o365.pth
+deta_image_cache/

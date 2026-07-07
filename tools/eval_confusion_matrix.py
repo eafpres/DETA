@@ -346,16 +346,14 @@ def get_threshold_rank(metrics, threshold, optimization_metric):
       metrics['precision'],
       metrics['recall'],
       metrics['f1'],
-      metrics['accuracy'],
-      threshold
+      -abs(float(threshold) - 0.5)
     )
   if optimization_metric == 'recall':
     return (
       metrics['recall'],
       metrics['precision'],
       metrics['f1'],
-      metrics['accuracy'],
-      -threshold
+      -abs(float(threshold) - 0.5)
     )
   if optimization_metric == 'accuracy':
     return (
@@ -363,14 +361,13 @@ def get_threshold_rank(metrics, threshold, optimization_metric):
       metrics['f1'],
       metrics['precision'],
       metrics['recall'],
-      threshold
+      -abs(float(threshold) - 0.5)
     )
   return (
     metrics['f1'],
-    metrics['accuracy'],
     metrics['precision'],
     metrics['recall'],
-    threshold
+    -abs(float(threshold) - 0.5)
   )
 def optimize_class_thresholds(
   image_records,
