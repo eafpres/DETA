@@ -366,7 +366,7 @@ class LossMonitorWindow(QtWidgets.QMainWindow):
       0.975,
       "",
       transform = self.ax.transAxes,
-      fontsize = 9,
+      fontsize = 6,
       fontfamily = "monospace",
       verticalalignment = "top",
       horizontalalignment = "left",
@@ -374,13 +374,13 @@ class LossMonitorWindow(QtWidgets.QMainWindow):
         "boxstyle": "round,pad=0.35",
         "facecolor": "#111111",
         "edgecolor": "#777777",
-        "alpha": 0.85
+        "alpha": 0.6
       }
     )
     self.ax.set_xlabel("cumulative training batch")
     self.ax.set_ylabel("loss")
     self.ax.grid(visible = True, alpha = 0.25)
-    self.ax.legend()
+    self.ax.legend(fontsize = 8, title_fontsize = 10, loc = 'upper right')
     self.install_window_filter(frame)
     self.update_plot()
     self.timer = QtCore.QTimer(self)
