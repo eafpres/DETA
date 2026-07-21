@@ -13,3 +13,5 @@ results/
 models/ops/build/
 adet_swin_pt_o365.pth
 deta_image_cache/
+
+tools/monitor_deta_batch_loss_qt_minimal_metrics_w_val_launch_info.py

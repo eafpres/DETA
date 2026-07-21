@@ -383,9 +383,11 @@ def resolve_image_path(images_root, file_name):
   if file_path.is_absolute() and file_path.exists():
     return file_path
   return Path(images_root).expanduser() / file_name
-def draw_box(draw, bbox, outline, label):
+def draw_box(draw, bbox, outline, label, width = 3, draw_label = True):
   x0, y0, x1, y1 = [float(value) for value in bbox]
-  draw.rectangle([x0, y0, x1, y1], outline = outline, width = 3)
+  draw.rectangle([x0, y0, x1, y1], outline = outline, width = width)
+  if not draw_label:
+    return
   try:
     font = ImageFont.load_default()
   except Exception:
@@ -416,7 +418,9 @@ def export_poor_images(image_df, detail_df, output_dir, images_root, top_k_image
           draw_box(draw, json.loads(detail_row['pred_bbox_xyxy']), 'yellow', f'PRED {detail_row["predicted_class"]}')
         continue
       if detail_row['match_type'] == 'false_negative' and detail_row['gt_bbox_xyxy']:
-        draw_box(draw, json.loads(detail_row['gt_bbox_xyxy']), 'red', f'FN {detail_row["actual_class"]}')
+        gt_bbox = json.loads(detail_row['gt_bbox_xyxy'])
+        draw_box(draw, gt_bbox, 'yellow', '', width = 7, draw_label = False)
+        draw_box(draw, gt_bbox, 'red', f'FN {detail_row["actual_class"]}', width = 3)
       if detail_row['match_type'] == 'false_positive' and detail_row['pred_bbox_xyxy']:
         draw_box(draw, json.loads(detail_row['pred_bbox_xyxy']), 'cyan', f'FP {detail_row["predicted_class"]} {detail_row["score"]:.2f}')
     safe_name = Path(str(image_row['file_name'])).name
