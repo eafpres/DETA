@@ -166,16 +166,39 @@ PY
 #
 cd "$BASE_DIR"
 if [ -d "$REPO_DIR/.git" ]; then
-  git -C "$REPO_DIR" pull
+  git -C "$REPO_DIR" pull --ff-only
+elif [ -e "$REPO_DIR" ]; then
+  if [ ! -d "$REPO_DIR" ]; then
+    echo "repository path exists but is not a directory: $REPO_DIR"
+    exit 1
+  fi
+  REPO_STAGE="$(mktemp -d "$BASE_DIR/.deta_clone.XXXXXX")"
+  cleanup_repo_stage() {
+    if [ -n "${REPO_STAGE:-}" ] && [ -d "$REPO_STAGE" ]; then
+      rm -rf "$REPO_STAGE"
+    fi
+  }
+  trap cleanup_repo_stage EXIT
+  git clone "$REPO_URL" "$REPO_STAGE/repo"
+  cp -a -n "$REPO_STAGE/repo/." "$REPO_DIR/"
+  rm -rf "$REPO_STAGE"
+  REPO_STAGE=""
+  echo "adopted existing directory as DETA repository: $REPO_DIR"
+  echo "existing files were preserved"
 else
   git clone "$REPO_URL" "$REPO_DIR"
+fi
+if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "failed to initialize DETA repository: $REPO_DIR"
+  exit 1
 fi
 if [ ! -d "$DETA_DIR/models/ops" ]; then
   echo "DETA models/ops directory not found: $DETA_DIR/models/ops"
   exit 1
 fi
-if [ ! -f "$DETA_DIR/tools/infer_folder.py" ]; then
-  echo "DETA inference script not found: $DETA_DIR/tools/infer_folder.py"
+if [ ! -f "$DETA_DIR/tools/infer_folder_remote_Jetson.py" ]; then
+  echo "DETA inference script not found:"
+  echo "  $DETA_DIR/tools/infer_folder_remote_Jetson.py"
   exit 1
 fi
 #
@@ -198,7 +221,7 @@ export PATH="/usr/local/cuda/bin:\$PATH"
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:\${LD_LIBRARY_PATH:-}"
 source "$VENV_DIR/bin/activate"
 cd "$DETA_DIR"
-python tools/infer_folder.py "\$@"
+python tools/infer_folder_remote_Jetson.py "\$@"
 EOF
 chmod +x "$HOME/run_deta_infer.sh"
 #
