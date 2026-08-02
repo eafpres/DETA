@@ -5,6 +5,7 @@ Evaluate DETA train-set image-level annotation performance.
 """
 import argparse
 import json
+import shutil
 import sys
 import warnings
 from pathlib import Path
@@ -28,6 +29,9 @@ LABEL_MODE = 'auto'
 MAX_IMAGES = None
 TOP_K_IMAGES = 250
 EXPORT_IMAGES = True
+EXPORT_SCALE = 2.0
+INCLUDE_ZERO_ERROR_IMAGES = False
+CLEAR_EXPORT_DIR = True
 EXCLUDED_CLASSES = [
   'Damaged_mirror',
   'Damaged_glass',
@@ -68,6 +72,8 @@ def parse_args():
   parser.add_argument('--max-images', default = MAX_IMAGES, type = int)
   parser.add_argument('--top-k-images', default = TOP_K_IMAGES, type = int)
   parser.add_argument('--export-images', action = argparse.BooleanOptionalAction, default = EXPORT_IMAGES)
+  parser.add_argument('--export-scale', default = EXPORT_SCALE, type = float)
+  parser.add_argument('--include-zero-error-images', action = argparse.BooleanOptionalAction, default = INCLUDE_ZERO_ERROR_IMAGES)
   parser.add_argument('--thresholds-csv', default = None)
   parser.add_argument('--optimize-thresholds', action = argparse.BooleanOptionalAction, default = OPTIMIZE_THRESHOLDS)
   parser.add_argument('--threshold-optimization-metric', choices = ['accuracy', 'f1', 'precision', 'recall'], default = THRESHOLD_OPTIMIZATION_METRIC)
@@ -75,6 +81,7 @@ def parse_args():
   parser.add_argument('--min-confidence-threshold', default = MIN_CONFIDENCE_THRESHOLD, type = float)
   parser.add_argument('--max-confidence-threshold', default = MAX_CONFIDENCE_THRESHOLD, type = float)
   parser.add_argument('--confidence-threshold-step', default = CONFIDENCE_THRESHOLD_STEP, type = float)
+  parser.add_argument('--clear-export-dir', action = argparse.BooleanOptionalAction, default = CLEAR_EXPORT_DIR)
   return parser.parse_args()
 def load_checkpoint(checkpoint_path):
   return torch.load(checkpoint_path, map_location = 'cpu', weights_only = False)
@@ -369,8 +376,19 @@ def evaluate_image_records(image_records, category_name_by_id, threshold_by_cate
       append_detail_row(detail_rows, image_record, 'false_positive', 'background', category_name_by_id[pred_category_id], np.nan, pred_scores[pred_idx], pred_thresholds[pred_idx], None, pred_boxes[pred_idx])
     false_negative = (len(gt_boxes) - len(matched_gt)) + misclassified
     false_positive = (len(pred_boxes) - len(matched_pred)) + misclassified
-    metrics = calculate_metrics(true_positive, false_positive, false_negative)
     error_count = false_positive + false_negative
+    if len(gt_boxes) == 0 and len(pred_boxes) == 0:
+      metrics = {
+        'true_positive': 0,
+        'false_positive': 0,
+        'false_negative': 0,
+        'accuracy': 1.0,
+        'precision': 1.0,
+        'recall': 1.0,
+        'f1': 1.0
+      }
+    else:
+      metrics = calculate_metrics(true_positive, false_positive, false_negative)
     mean_matched_iou = float(np.mean(matched_ious)) if matched_ious else 0.0
     score_sum_fp = sum(pred_scores[pred_idx] for pred_idx in range(len(pred_scores)) if pred_idx not in matched_pred)
     image_rows.append({'image_id': image_record['image_id'], 'file_name': image_record['file_name'], 'width': image_record['width'], 'height': image_record['height'], 'ground_truth': len(gt_boxes), 'predicted': len(pred_boxes), 'matched': len(matches), 'misclassified': misclassified, 'error_count': error_count, 'mean_matched_iou': mean_matched_iou, 'score_sum_fp': score_sum_fp, **metrics})
@@ -383,49 +401,151 @@ def resolve_image_path(images_root, file_name):
   if file_path.is_absolute() and file_path.exists():
     return file_path
   return Path(images_root).expanduser() / file_name
-def draw_box(draw, bbox, outline, label, width = 3, draw_label = True):
+def get_annotation_font(font_size):
+  try:
+    return ImageFont.truetype('DejaVuSans-Bold.ttf', font_size)
+  except Exception:
+    try:
+      return ImageFont.truetype('arial.ttf', font_size)
+    except Exception:
+      return ImageFont.load_default()
+def scale_bbox(bbox, export_scale):
+  return [
+    float(value) * export_scale
+    for value in bbox
+  ]
+def get_text_bounds(draw, text_pos, label, font):
+  try:
+    return draw.textbbox(text_pos, label, font = font)
+  except Exception:
+    try:
+      left, top, right, bottom = font.getbbox(label)
+      return (
+        text_pos[0] + left,
+        text_pos[1] + top,
+        text_pos[0] + right,
+        text_pos[1] + bottom
+      )
+    except Exception:
+      width = 6 * len(str(label))
+      height = 12
+      return (
+        text_pos[0],
+        text_pos[1],
+        text_pos[0] + width,
+        text_pos[1] + height
+      )
+def draw_box(
+  draw,
+  bbox,
+  outline,
+  label,
+  width = 3,
+  draw_label = True,
+  font = None,
+  label_offset = 12,
+  label_padding = 3
+):
   x0, y0, x1, y1 = [float(value) for value in bbox]
   draw.rectangle([x0, y0, x1, y1], outline = outline, width = width)
-  if not draw_label:
+  if not draw_label or not str(label):
     return
-  try:
+  if font is None:
     font = ImageFont.load_default()
-  except Exception:
-    font = None
-  text_pos = (x0 + 2, max(0, y0 - 12))
-  draw.text(text_pos, label, fill = outline, font = font)
-def export_poor_images(image_df, detail_df, output_dir, images_root, top_k_images):
+  text_pos = (x0 + 2, max(0, y0 - label_offset))
+  text_bounds = get_text_bounds(draw, text_pos, label, font)
+  background_bounds = (
+    text_bounds[0] - label_padding,
+    text_bounds[1] - label_padding,
+    text_bounds[2] + label_padding,
+    text_bounds[3] + label_padding
+  )
+  draw.rectangle(background_bounds, fill = 'white')
+  draw.text(text_pos, label, fill = 'black', font = font)
+def stack_annotated_with_original(annotated_image, original_image, export_scale):
+  separator_height = max(4, int(round(8 * export_scale)))
+  if original_image.size != annotated_image.size:
+    original_image = original_image.resize(
+      annotated_image.size,
+      Image.Resampling.LANCZOS
+    )
+  stacked_image = Image.new(
+    'RGB',
+    (
+      annotated_image.width,
+      annotated_image.height + separator_height + original_image.height
+    ),
+    'white'
+  )
+  stacked_image.paste(annotated_image, (0, 0))
+  stacked_image.paste(original_image, (0, annotated_image.height + separator_height))
+  return stacked_image
+def export_poor_images(
+  image_df,
+  detail_df,
+  output_dir,
+  images_root,
+  top_k_images,
+  export_scale,
+  include_zero_error_images,
+  clear_export_dir
+):
   image_output_dir = output_dir / 'poorest_images'
+  if clear_export_dir and image_output_dir.exists():
+    shutil.rmtree(image_output_dir)
   image_output_dir.mkdir(parents = True, exist_ok = True)
-  poorest_df = image_df.head(top_k_images).copy()
+  export_df = image_df.copy()
+  if not include_zero_error_images:
+    export_df = export_df.loc[export_df['error_count'] > 0].copy()
+  poorest_df = export_df.head(top_k_images).copy()
   for rank, (_, image_row) in enumerate(poorest_df.iterrows(), start = 1):
     image_path = resolve_image_path(images_root, image_row['file_name'])
     if not image_path.exists():
       warnings.warn(f'image not found: {image_path}', RuntimeWarning)
       continue
-    image = Image.open(image_path).convert('RGB')
+    original_image = Image.open(image_path).convert('RGB')
+    if export_scale <= 0:
+      raise ValueError('export scale must be greater than zero.')
+    if export_scale == 1:
+      image = original_image.copy()
+    else:
+      scaled_size = (
+        int(round(original_image.width * export_scale)),
+        int(round(original_image.height * export_scale))
+      )
+      image = original_image.resize(scaled_size, Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
+    box_width = max(1, int(round(3 * export_scale)))
+    fn_outer_width = max(box_width + 2, int(round(7 * export_scale)))
+    font_size = max(10, int(round(12 * export_scale)))
+    label_offset = max(12, int(round(12 * export_scale)))
+    font = get_annotation_font(font_size)
     image_details = detail_df.loc[detail_df['image_id'] == image_row['image_id']]
     for _, detail_row in image_details.iterrows():
       if detail_row['match_type'] == 'true_positive':
         if detail_row['gt_bbox_xyxy']:
-          draw_box(draw, json.loads(detail_row['gt_bbox_xyxy']), 'lime', f'GT/PRED {detail_row["actual_class"]}')
+          draw_box(draw, scale_bbox(json.loads(detail_row['gt_bbox_xyxy']), export_scale), 'lime', f'GT/PRED {detail_row["actual_class"]}', width = box_width, font = font, label_offset = label_offset)
         continue
       if detail_row['match_type'] == 'misclassified':
         if detail_row['gt_bbox_xyxy']:
-          draw_box(draw, json.loads(detail_row['gt_bbox_xyxy']), 'orange', f'GT {detail_row["actual_class"]}')
+          draw_box(draw, scale_bbox(json.loads(detail_row['gt_bbox_xyxy']), export_scale), 'orange', f'GT {detail_row["actual_class"]}', width = box_width, font = font, label_offset = label_offset)
         if detail_row['pred_bbox_xyxy']:
-          draw_box(draw, json.loads(detail_row['pred_bbox_xyxy']), 'yellow', f'PRED {detail_row["predicted_class"]}')
+          draw_box(draw, scale_bbox(json.loads(detail_row['pred_bbox_xyxy']), export_scale), 'yellow', f'PRED {detail_row["predicted_class"]}', width = box_width, font = font, label_offset = label_offset)
         continue
       if detail_row['match_type'] == 'false_negative' and detail_row['gt_bbox_xyxy']:
         gt_bbox = json.loads(detail_row['gt_bbox_xyxy'])
-        draw_box(draw, gt_bbox, 'yellow', '', width = 7, draw_label = False)
-        draw_box(draw, gt_bbox, 'red', f'FN {detail_row["actual_class"]}', width = 3)
+        draw_box(draw, scale_bbox(gt_bbox, export_scale), 'yellow', '', width = fn_outer_width, draw_label = False)
+        draw_box(draw, scale_bbox(gt_bbox, export_scale), 'red', f'FN {detail_row["actual_class"]}', width = box_width, font = font, label_offset = label_offset)
       if detail_row['match_type'] == 'false_positive' and detail_row['pred_bbox_xyxy']:
-        draw_box(draw, json.loads(detail_row['pred_bbox_xyxy']), 'cyan', f'FP {detail_row["predicted_class"]} {detail_row["score"]:.2f}')
+        draw_box(draw, scale_bbox(json.loads(detail_row['pred_bbox_xyxy']), export_scale), 'blue', f'FP {detail_row["predicted_class"]} {detail_row["score"]:.2f}', width = box_width, font = font, label_offset = label_offset)
+    output_image = stack_annotated_with_original(
+      image,
+      original_image,
+      export_scale
+    )
     safe_name = Path(str(image_row['file_name'])).name
     output_name = f'{rank:06d}_f1_{image_row["f1"]:.3f}_err_{int(image_row["error_count"])}_{safe_name}'
-    image.save(image_output_dir / output_name)
+    output_image.save(image_output_dir / output_name)
 def main():
   cli_args = parse_args()
   excluded_classes = EXCLUDED_CLASSES if cli_args.exclude_classes is None else cli_args.exclude_classes
@@ -468,7 +588,16 @@ def main():
   if not threshold_search_df.empty:
     threshold_search_df.to_csv(output_dir / 'threshold_search_results.csv', index = False)
   if cli_args.export_images:
-    export_poor_images(image_df, detail_df, output_dir, cli_args.coco_train_images, cli_args.top_k_images)
+    export_poor_images(
+      image_df,
+      detail_df,
+      output_dir,
+      cli_args.coco_train_images,
+      cli_args.top_k_images,
+      cli_args.export_scale,
+      cli_args.include_zero_error_images,
+      cli_args.clear_export_dir
+    )
   print('', flush = True)
   print('poorest train images:', flush = True)
   print(image_df.head(min(cli_args.top_k_images, 25)).to_string(index = False), flush = True)
