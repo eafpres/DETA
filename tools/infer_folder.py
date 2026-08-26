@@ -410,29 +410,56 @@ def draw_predictions(image_bgr, boxes, scores, labels, class_names):
     np.ndarray: Annotated image.
   """
   out = image_bgr.copy()
+  image_height, image_width = out.shape[:2]
+  box_thickness = 2
+  font = cv2.FONT_HERSHEY_SIMPLEX
+  font_scale = 1.0
+  text_thickness = 2
+  padding = 4
+  box_inset = (box_thickness + 1) // 2
   for box, score, label_id in zip(boxes, scores, labels):
     x0, y0, x1, y1 = box.astype(int).tolist()
     text = f"{label_for_id(label_id, class_names)} {score:.2f}"
-    cv2.rectangle(out, (x0, y0), (x1, y1), (0, 255, 0), 2)
+    x0 = int(np.clip(x0, box_inset, max(box_inset, image_width - 1 - box_inset)))
+    x1 = int(np.clip(x1, box_inset, max(box_inset, image_width - 1 - box_inset)))
+    y0 = int(np.clip(y0, box_inset, max(box_inset, image_height - 1 - box_inset)))
+    y1 = int(np.clip(y1, box_inset, max(box_inset, image_height - 1 - box_inset)))
+    x0, x1 = sorted((x0, x1))
+    y0, y1 = sorted((y0, y1))
+    cv2.rectangle(
+      out,
+      (x0, y0),
+      (x1, y1),
+      (0, 255, 0),
+      box_thickness
+    )
     text_size, baseline = cv2.getTextSize(
       text,
-      cv2.FONT_HERSHEY_SIMPLEX,
-      1.5,
-      1
+      font,
+      font_scale,
+      text_thickness
     )
-    tx0 = x0
-    ty0 = max(0, y0 - text_size[1] - baseline - 4)
-    tx1 = min(out.shape[1] - 1, x0 + text_size[0] + 4)
-    ty1 = y0
+    label_width = min(image_width, text_size[0] + 2 * padding)
+    label_height = min(image_height, text_size[1] + baseline + 2 * padding)
+    tx0 = int(np.clip(x0, 0, max(0, image_width - label_width)))
+    tx1 = min(image_width - 1, tx0 + label_width - 1)
+    if y0 >= label_height:
+      ty1 = y0
+      ty0 = y0 - label_height
+    else:
+      ty0 = y0
+      ty1 = min(image_height - 1, y0 + label_height - 1)
     cv2.rectangle(out, (tx0, ty0), (tx1, ty1), (0, 255, 0), -1)
+    text_x = tx0 + padding
+    text_y = min(ty1 - baseline - padding, ty0 + padding + text_size[1])
     cv2.putText(
       out,
       text,
-      (x0 + 2, max(text_size[1] + 2, y0 - baseline - 2)),
-      cv2.FONT_HERSHEY_SIMPLEX,
-      1.0,
+      (text_x, text_y),
+      font,
+      font_scale,
       (0, 0, 0),
-      2,
+      text_thickness,
       cv2.LINE_AA
     )
   return out
