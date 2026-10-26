@@ -4,9 +4,9 @@
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
+#
 set -x
-
+#
 GPUS=$1
 RUN_COMMAND=${@:2}
 if [ $GPUS -lt 8 ]; then
@@ -17,9 +17,9 @@ fi
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-"29500"}
 NODE_RANK=${NODE_RANK:-0}
-
+#
 let "NNODES=GPUS/GPUS_PER_NODE"
-
+#
 python ./tools/launch.py \
     --nnodes ${NNODES} \
     --node_rank ${NODE_RANK} \

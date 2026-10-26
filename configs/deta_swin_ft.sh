@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-
+#
 set -x
-
+#
 EXP_DIR=exps/public/deta_swin_ft
 PY_ARGS=${@:1}
-
+#
 python -u main.py \
     --output_dir ${EXP_DIR} \
     --with_box_refine --two_stage \
