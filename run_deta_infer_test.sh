@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$HOME/DETA/DETA"
-
-python tools/infer_folder.py \
-  --checkpoint "$HOME/DETA/DETA/exps/public/deta_swin_ft_e8/checkpoint.pth" \
-  --image-dir "/mnt/c/users/bbate/desktop/images" \
-  --output-dir "/mnt/c/users/bbate/desktop/inference_results" \
-  --location-iou-threshold 0.4 \
-  --test-images /"mnt/c/users/bbate/desktop/test_images" \
-  --classes "$HOME/DETA/DETA/data/classes.txt" \
-  --threshold 0.4 \
-  --stable-wait-ms 500\
-  --blank-width 1200 \
-  --blank-height 900 \
-  --window-x 50 \
-  --window-y 50 \
-  "$@"
+#
+# Delegate to the reusable test wrapper so test and normal inference share setup.
+#
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TEST_LAUNCHER="${DETA_TEST_LAUNCHER:-$REPO_DIR/tools/run_deta_infer_test_jetson_remote.sh}"
+if [[ ! -x "$TEST_LAUNCHER" ]]; then
+  echo "Jetson test launcher is missing or not executable: $TEST_LAUNCHER" >&2
+  exit 1
+fi
+exec "$TEST_LAUNCHER" "$@"

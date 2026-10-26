@@ -1,17 +1,82 @@
-data/
-.spyproject/config/
-__pycache__/
-**/__pycache__/
-*.pyc
-*.pyo
+#
+# Keep datasets external because their images and annotation JSON files are
+# machine-specific inputs rather than reproducible source code.
+#
+/data/
+/deta_image_cache/
+#
+# Keep model weights and checkpoints in artifact storage so large binaries do
+# not accumulate in repository history.
+#
+/checkpoints/
+/weights/
 *.pth
 *.pt
 *.ckpt
-checkpoints/
-exps/
-results/
-models/ops/build/
-adet_swin_pt_o365.pth
-deta_image_cache/
-
-tools/monitor_deta_batch_loss_qt_minimal_metrics_w_val_launch_info.py
+*.onnx
+*.engine
+#
+# Keep experiment outputs, reports, caches, and generated media external so
+# evaluation runs do not obscure source changes.
+#
+/exps/
+/results/
+/outputs/
+/artifacts/
+/cache/
+*.log
+*.csv
+*.tsv
+*.parquet
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+*.webp
+*.mp4
+*.avi
+#
+# Ignore Python bytecode and native build products because they depend on the
+# local interpreter, compiler, CUDA toolkit, and target architecture.
+#
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+/models/ops/build/
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+#
+# Ignore editor and operating-system metadata because it varies by workstation
+# and has no effect on DETA or Jetson behavior.
+#
+.spyproject/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+#
+# Ignore the generated image-transfer inventory because it records external
+# dataset files and can be recreated from the artifact store.
+#
+/files_to_move.txt
+#
+# Ignore exported working-session transcripts because they contain raw chat
+# history rather than curated project documentation.
+#
+/docs/deta_*.md
+/docs/monitor_data.md

@@ -13,6 +13,7 @@ COCO dataset which returns image_id for evaluation.
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
 from pathlib import Path
+import random
 
 import torch
 import torch.utils.data
@@ -29,14 +30,85 @@ class CocoDetection(TvCocoDetection):
                                             cache_mode=cache_mode, local_rank=local_rank, local_size=local_size)
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
+#
+# Routing annotation-centered draws through the eligible-image pool preserves
+# the requested 35% branch rate instead of silently falling back on images that
+# contain no localized small-damage anchor.
+#
+        self._mixed_crop = self._find_mixed_crop(transforms)
+        self._mixed_anchor_indices = []
+        self._mixed_anchor_index_set = set()
+        if self._mixed_crop is not None:
+            self._mixed_anchor_indices = [
+                dataset_index
+                for dataset_index, image_id in enumerate(self.ids)
+                if any(
+                    self._mixed_crop.annotation_is_anchor(annotation)
+                    for annotation in self.coco.imgToAnns.get(image_id, [])
+                )
+            ]
+            self._mixed_anchor_index_set = set(self._mixed_anchor_indices)
+            if (
+                self._mixed_crop.annotation_probability > 0 and
+                not self._mixed_anchor_indices
+            ):
+                raise ValueError(
+                    'Annotation-centered augmentation requires at least one '
+                    'eligible anchor image.'
+                )
+    @staticmethod
+    def _find_mixed_crop(transforms):
+        """Locate the optional mixed-crop transform in the training pipeline.
+        Args:
+            transforms: Dataset transform or composed transform sequence.
+        Returns:
+            MixedDamageCrop or None: Configured crop policy when present.
+        """
+        if isinstance(transforms, T.MixedDamageCrop):
+            return transforms
+        for transform in getattr(transforms, 'transforms', []):
+            mixed_crop = CocoDetection._find_mixed_crop(transform)
+            if mixed_crop is not None:
+                return mixed_crop
+        return None
+#
+# A draw remains one logical sample even when its source image is rerouted.
+# Tensor metadata makes this behavior auditable and remains compatible with the
+# existing prefetcher, which moves every target field to the selected device.
+#
+    def _route_mixed_crop(self, idx):
+        """Choose the branch and an eligible source index for one sample.
+        Args:
+            idx: Dataset index selected by the sampler.
+        Returns:
+            tuple: Source index, sampled branch code, and reroute indicator.
+        """
+        if self._mixed_crop is None:
+            return idx, None, False
+        branch = self._mixed_crop.sample_branch()
+        rerouted = False
+        if (
+            branch == self._mixed_crop.ANNOTATION_CENTERED and
+            idx not in self._mixed_anchor_index_set
+        ):
+            idx = random.choice(self._mixed_anchor_indices)
+            rerouted = True
+        self._mixed_crop.force_next_branch(branch)
+        return idx, branch, rerouted
 
     def __getitem__(self, idx):
-        img, target = super(CocoDetection, self).__getitem__(idx)
-        image_id = self.ids[idx]
+        source_idx, branch, rerouted = self._route_mixed_crop(idx)
+        img, target = super(CocoDetection, self).__getitem__(source_idx)
+        image_id = self.ids[source_idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
+        if branch is not None:
+            target['augmentation_rerouted'] = torch.tensor(
+                int(rerouted),
+                dtype = torch.int64
+            )
         return img, target
 
 
@@ -122,7 +194,7 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 
-def make_coco_transforms(image_set, bigger):
+def make_coco_transforms(image_set, bigger=False, mixed_crop_config=None):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -138,7 +210,35 @@ def make_coco_transforms(image_set, bigger):
     if bigger:
         scales = [int(1.5*s) for s in scales]
         max_size = 2000
-
+    if image_set == 'train' and mixed_crop_config is not None:
+        scales = list(mixed_crop_config['train_scales'])
+        max_size = int(mixed_crop_config['max_size'])
+        return T.Compose([
+            T.RandomHorizontalFlip(),
+            T.MixedDamageCrop(
+                full_probability = mixed_crop_config['full_probability'],
+                annotation_probability = mixed_crop_config[
+                    'annotation_probability'
+                ],
+                background_probability = mixed_crop_config[
+                    'background_probability'
+                ],
+                anchor_class_ids = mixed_crop_config['anchor_class_ids'],
+                anchor_max_area = mixed_crop_config['anchor_max_area'],
+                context_multiplier = mixed_crop_config['context_multiplier'],
+                minimum_crop_size = mixed_crop_config['minimum_crop_size'],
+                maximum_crop_size = mixed_crop_config['maximum_crop_size'],
+                center_jitter = mixed_crop_config['center_jitter'],
+                minimum_visible_fraction = mixed_crop_config[
+                    'minimum_visible_fraction'
+                ],
+                background_attempts = mixed_crop_config[
+                    'background_attempts'
+                ]
+            ),
+            T.RandomResize(scales, max_size=max_size),
+            normalize,
+        ])
     if image_set == 'train':
         return T.Compose([
             T.RandomHorizontalFlip(),
@@ -160,8 +260,50 @@ def make_coco_transforms(image_set, bigger):
         ])
 
     raise ValueError(f'unknown {image_set}')
-
-
+def build_mixed_crop_config(args):
+    """Build and validate the optional damage-specific augmentation config.
+    Args:
+        args: Parsed training arguments.
+    Returns:
+        dict or None: Mixed-crop settings when enabled.
+    """
+    if not getattr(args, 'damage_mixed_crop', False):
+        return None
+    train_scales = [
+        int(value) for value in args.damage_aug_train_scales
+    ]
+    if not train_scales or any(value <= 0 for value in train_scales):
+        raise ValueError('Damage augmentation scales must be positive.')
+    if args.damage_aug_max_size < max(train_scales):
+        raise ValueError(
+            'Damage augmentation max size cannot be smaller than its scales.'
+        )
+    anchor_class_ids = [
+        int(value) for value in args.damage_aug_anchor_class_ids
+    ]
+    if not anchor_class_ids:
+        raise ValueError('At least one damage anchor class ID is required.')
+    return {
+        'train_scales': sorted(set(train_scales)),
+        'max_size': int(args.damage_aug_max_size),
+        'full_probability': float(args.damage_aug_full_probability),
+        'annotation_probability': float(
+            args.damage_aug_annotation_probability
+        ),
+        'background_probability': float(
+            args.damage_aug_background_probability
+        ),
+        'anchor_class_ids': sorted(set(anchor_class_ids)),
+        'anchor_max_area': float(args.damage_aug_anchor_max_area),
+        'context_multiplier': float(args.damage_aug_context_multiplier),
+        'minimum_crop_size': int(args.damage_aug_min_crop_size),
+        'maximum_crop_size': int(args.damage_aug_max_crop_size),
+        'center_jitter': float(args.damage_aug_center_jitter),
+        'minimum_visible_fraction': float(
+            args.damage_aug_min_visible_fraction
+        ),
+        'background_attempts': int(args.damage_aug_background_attempts)
+    }
 def build(image_set, args):
     root = Path(args.coco_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
@@ -178,10 +320,17 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
+    mixed_crop_config = build_mixed_crop_config(args)
+    if image_set == 'train' and mixed_crop_config is not None:
+        print(f'Damage mixed-crop augmentation: {mixed_crop_config}')
     dataset = CocoDetection(
         img_folder,
         ann_file,
-        transforms = make_coco_transforms(image_set, args.bigger),
+        transforms = make_coco_transforms(
+            image_set,
+            args.bigger,
+            mixed_crop_config = mixed_crop_config
+        ),
         return_masks = args.masks,
         cache_mode = args.cache_mode,
         local_rank = get_local_rank(),

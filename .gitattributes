@@ -1,0 +1,28 @@
+#
+# Keep source text on LF so the same checkout behaves consistently in Windows,
+# WSL, and Jetson Linux without producing whole-file line-ending diffs.
+#
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.c text eol=lf
+*.cc text eol=lf
+*.cpp text eol=lf
+*.cu text eol=lf
+*.cuh text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+#
+# Treat generated media and model artifacts as binary if they are ever handled
+# explicitly, preventing line-ending filters from touching their bytes.
+#
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pth binary
+*.pt binary
+*.ckpt binary
+*.so binary
+*.o binary

@@ -11,6 +11,10 @@ VENV_DIR="$HOME/venvs/deta_infer_jetson"
 TORCH_WHEEL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
 TORCHVISION_TAG="v0.20.0"
 #
+# Match the tracked lowercase path because Jetson filesystems are case-sensitive.
+#
+INFERENCE_ENTRYPOINT="tools/infer_folder_remote_jetson.py"
+#
 # Normalize this script if copied from Windows
 #
 sed -i 's/\r$//' "$0"
@@ -196,9 +200,9 @@ if [ ! -d "$DETA_DIR/models/ops" ]; then
   echo "DETA models/ops directory not found: $DETA_DIR/models/ops"
   exit 1
 fi
-if [ ! -f "$DETA_DIR/tools/infer_folder_remote_Jetson.py" ]; then
+if [ ! -f "$DETA_DIR/$INFERENCE_ENTRYPOINT" ]; then
   echo "DETA inference script not found:"
-  echo "  $DETA_DIR/tools/infer_folder_remote_Jetson.py"
+  echo "  $DETA_DIR/$INFERENCE_ENTRYPOINT"
   exit 1
 fi
 #
@@ -221,7 +225,7 @@ export PATH="/usr/local/cuda/bin:\$PATH"
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:\${LD_LIBRARY_PATH:-}"
 source "$VENV_DIR/bin/activate"
 cd "$DETA_DIR"
-python tools/infer_folder_remote_Jetson.py "\$@"
+python "$INFERENCE_ENTRYPOINT" "\$@"
 EOF
 chmod +x "$HOME/run_deta_infer.sh"
 #
