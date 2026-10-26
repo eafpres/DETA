@@ -100,6 +100,16 @@ def get_args_parser():
     # * Matcher
     parser.add_argument('--assign_first_stage', action='store_true')
     parser.add_argument('--assign_second_stage', action='store_true')
+#
+# Expose inference duplicate suppression so validation can select an NMS
+# operating point without changing trained model weights.
+#
+    parser.add_argument(
+        '--nms_iou_threshold',
+        default = 0.7,
+        type = float,
+        help = 'Class-aware NMS IoU threshold used by second-stage inference'
+    )
     parser.add_argument('--set_cost_class', default=2, type=float,
                         help="Class coefficient in the matching cost")
     parser.add_argument('--set_cost_bbox', default=5, type=float,
@@ -115,10 +125,96 @@ def get_args_parser():
     parser.add_argument('--focal_alpha', default=0.25, type=float)
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
+#
+# Custom damage taxonomies need the classifier width to match their compact
+# category IDs instead of inheriting the 91-class COCO detector default.
+#
+    parser.add_argument('--num_classes', default=None, type=int)
     parser.add_argument('--coco_path', default='./data/coco', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
     parser.add_argument('--bigger', action='store_true')
+#
+# Experiment 3 replaces pre-rendered mosaics with a reproducible, training-only
+# mixture that preserves full-image context and magnifies small local damage.
+#
+    parser.add_argument(
+        '--damage_mixed_crop',
+        action = 'store_true',
+        help = 'Enable mixed full-image, annotation, and background crops'
+    )
+    parser.add_argument(
+        '--damage_aug_train_scales',
+        default = [1056, 1104, 1152, 1200],
+        nargs = '+',
+        type = int,
+        help = 'Actual short-side scales used by the mixed augmentation'
+    )
+    parser.add_argument(
+        '--damage_aug_max_size',
+        default = 2000,
+        type = int,
+        help = 'Maximum long side used after mixed augmentation'
+    )
+    parser.add_argument(
+        '--damage_aug_full_probability',
+        default = 0.50,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_annotation_probability',
+        default = 0.35,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_background_probability',
+        default = 0.15,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_anchor_class_ids',
+        default = [0, 1, 2, 5, 6, 7],
+        nargs = '+',
+        type = int,
+        help = 'Localized compact-v4 class IDs eligible as crop anchors'
+    )
+    parser.add_argument(
+        '--damage_aug_anchor_max_area',
+        default = 9216.0,
+        type = float,
+        help = 'Maximum native anchor area; 9216 is the COCO medium boundary'
+    )
+    parser.add_argument(
+        '--damage_aug_context_multiplier',
+        default = 6.0,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_min_crop_size',
+        default = 384,
+        type = int
+    )
+    parser.add_argument(
+        '--damage_aug_max_crop_size',
+        default = 1024,
+        type = int
+    )
+    parser.add_argument(
+        '--damage_aug_center_jitter',
+        default = 0.20,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_min_visible_fraction',
+        default = 0.60,
+        type = float
+    )
+    parser.add_argument(
+        '--damage_aug_background_attempts',
+        default = 10,
+        type = int,
+        help = 'Candidate regions searched for the cleanest random crop'
+    )
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',

@@ -448,8 +448,17 @@ class PostProcess(nn.Module):
         return results
 
 class NMSPostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
-
+    """Convert model outputs into detections with class-aware suppression.
+    Args:
+        nms_iou_threshold: Maximum same-class overlap retained by NMS.
+    Raises:
+        ValueError: If the threshold is outside the inclusive ``[0, 1]`` range.
+    """
+    def __init__(self, nms_iou_threshold = 0.7):
+        super().__init__()
+        if not 0.0 <= nms_iou_threshold <= 1.0:
+            raise ValueError('nms_iou_threshold must be between 0 and 1.')
+        self.nms_iou_threshold = float(nms_iou_threshold)
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
         """ Perform the computation
@@ -492,7 +501,12 @@ class NMSPostProcess(nn.Module):
                 score = score[pre_topk]
                 lbls = lbls[pre_topk]
 
-            keep_inds = batched_nms(box, score, lbls, 0.7)[:100]
+            keep_inds = batched_nms(
+                box,
+                score,
+                lbls,
+                self.nms_iou_threshold
+            )[:100]
             results.append({
                 'scores': score[keep_inds],
                 'labels': lbls[keep_inds],
@@ -519,9 +533,16 @@ class MLP(nn.Module):
 
 
 def build(args):
-    num_classes = 20 if args.dataset_file != 'coco' else 91
-    if args.dataset_file == "coco_panoptic":
+#
+# An explicit class count keeps compact custom taxonomies aligned with their
+# output head while retaining the historical defaults for existing commands.
+#
+    if getattr(args, "num_classes", None) is not None:
+        num_classes = args.num_classes
+    elif args.dataset_file == "coco_panoptic":
         num_classes = 250
+    else:
+        num_classes = 20 if args.dataset_file != 'coco' else 91
     device = torch.device(args.device)
 
     backbone = build_backbone(args)
@@ -563,7 +584,11 @@ def build(args):
                              assign_second_stage=args.assign_second_stage)
     criterion.to(device)
     if args.assign_second_stage:
-        postprocessors = {'bbox': NMSPostProcess()}
+        postprocessors = {
+            'bbox': NMSPostProcess(
+                getattr(args, 'nms_iou_threshold', 0.7)
+            )
+        }
     else:
         postprocessors = {'bbox': PostProcess()}
     if args.masks:
