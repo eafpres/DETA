@@ -242,6 +242,16 @@ def get_args_parser():
 #
 def main(args):
     utils.init_distributed_mode(args)
+#
+# Fail closed when an old one-GPU launcher silently enables distributed mode.
+# True multi-process training remains available if it is deliberately restored,
+# while all current one-GPU experiments use the same RandomSampler code path.
+#
+    if args.distributed and args.world_size == 1:
+        raise RuntimeError(
+            'Single-rank distributed training is disabled. Invoke the '
+            'configuration script directly for one-GPU training.'
+        )
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
